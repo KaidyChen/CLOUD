@@ -1,0 +1,79 @@
+-module(connector_gateway_to_client_server).
+
+-behaivor(gen_server).
+
+-export([start_link/0]).
+-export([insert/3]).
+-export([lookup/2]).
+
+-export([init/1,
+         handle_call/3,
+         handle_cast/2,
+         handle_info/2,
+         terminate/2,
+         code_change/3
+        ]).
+
+-record(state, {
+         }).
+
+-define(TAB_ID, gateway_to_client_store).
+
+%%%===========================================================================
+%% API
+%%%===========================================================================
+
+start_link() ->
+    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+
+insert(GatewayType, GatewayId, Pid) ->
+    gen_server:cast(?MODULE, {insert_store, {GatewayType, GatewayId}, Pid}).
+
+lookup(GatewayType, GatewayId) ->
+    lookup_for_store({GatewayType, GatewayId}).
+
+%%%============================================================================
+%% Gen_server callbacks
+%%%============================================================================
+
+init([]) ->
+    ets:new(?TAB_ID, [set, protected, named_table, {read_concurrency, true}]),
+    {ok, #state{}}.
+
+handle_call(_Request, _From, State) ->
+    {noreply, State}.
+
+handle_cast({insert_store, Key = {_GatewayType, _GatewayId}, Value = _Pid}, State) ->
+    insert_store(Key, Value),
+    {noreply, State};
+handle_cast(_Msg, State) ->
+    {noreply, State}.
+
+handle_info(_Info, State) ->
+    {noreply, State}.
+
+terminate(Reason, State) ->
+    ok.
+
+code_change(_OldVsn, State, _Extra) ->
+    {noreply, State}.
+
+%%%===============================================================================
+%% Internal functions
+%%%===============================================================================
+
+insert_store(Key, Value) ->
+    ets:insert(?TAB_ID, {Key, Value}).
+
+lookup_for_store(Key) ->
+    case ets:lookup(?TAB_ID, Key) of
+        [] ->
+            {error, not_found};
+        [{Key, Pid = _Value}] ->
+            case erlang:is_process_alive(Pid) of
+                true ->
+                    {ok, Pid};
+                false ->
+                    {error, not_alive}
+            end
+    end.

@@ -1,0 +1,595 @@
+-module(db_util).
+
+-include("print.hrl").
+-include("db.hrl").
+-include("config.hrl").
+
+-compile([export_all]).
+-define(EMPTY_LIST, "rows_is_empty_list").
+
+exec_select(SQL, Params) ->
+    case exec_sql(SQL, Params) of
+        [{columns, Columns}, {rows, Rows}] when (length(Rows) >= 1) ->
+            ?PRINT("Columns:~p~n", [Columns]),
+            ?PRINT("Rows:~p~n", [Rows]),
+            {ok, Rows};
+        [{columns, _}, {rows, []}] ->
+            {ok, []};
+        {error, _Code, Reason} ->
+            {error, Reason};
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+exec_insert(SQL, Params) ->
+    case exec_sql(SQL, Params) of
+        {rowid, Rowid} ->
+            {ok, Rowid};
+        {error, _Code, Reason} ->
+            {error, Reason};
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+exec_update(SQL, Params) ->
+    case exec_sql(SQL, Params) of
+        ok ->
+            ok;
+        {error, _Code, Reason} ->
+            {error, Reason};
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+exec_delete(SQL, Params) ->
+    case exec_sql(SQL, Params) of
+        ok ->
+            ok;
+        {error, _Code, Reason} ->
+            {error, Reason};
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+exec_sql(SQL, Params) ->
+    ?PRINT("SQL:~p~n", [SQL]),
+    ?PRINT("Params:~p~n", [Params]),
+    sqlite3:sql_exec(?DBNAME, SQL, Params).
+
+%%%=============================================================================================================
+%% Db server for Connector functions
+%%%=============================================================================================================
+
+load_eqpt_info() ->
+    SQL = <<"SELECT eqpt_id_code, eqpt_type, comm_level, upper_eqpt_type, upper_eqpt_id_code, dll_prefix FROM network_config">>,
+    Params = [],
+    {ok, Ref} = sqlite3:prepare(?DBNAME, SQL),
+    {ok, Ref}.
+
+read_row(Ref) ->
+    %% if not next return done
+    sqlite3:next(?DBNAME, Ref).
+
+finalize(Ref) ->
+    ok = sqlite3:finalize(?DBNAME, Ref).
+        
+
+%%%=============================================================================================================
+%% DB rest handler functions
+%%%=============================================================================================================
+
+is_exists_eqpt(DeviceId) ->
+    SQL = <<"SELECT seq FROM eqpt_info WHERE eqpt_id_code = :eqpt_id_code;">>,
+    Params = [{":eqpt_id_code", DeviceId}],
+    case exec_select(SQL, Params) of
+        {ok, []} ->
+            false;
+        {ok, Rows} when length(Rows) >= 1 ->
+            true;
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+is_exists_building(BuildingName) ->
+    SQL = <<"SELECT seq FROM eqpt_building WHERE eqpt_building_name = :eqpt_building_name;">>,
+    Params = [{":eqpt_building_name", BuildingName}],
+    case exec_select(SQL, Params) of
+        {ok, []} ->
+            false;
+        {ok, Rows} when length(Rows) >= 1 ->
+            true;
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+get_addtion_info(MeterId) ->
+    SQL = <<"SELECT eqpt_baudrate, eqpt_commport, eqpt_protocoltype, eqpt_rate, eqpt_zsw, eqpt_xsw, "
+            "eqpt_dlh, eqpt_xlh, eqpt_yblx FROM eqpt_info WHERE eqpt_id_code = :eqpt_id_code LIMIT 1;">>,
+    Params = [{":eqpt_id_code", MeterId}],
+    exec_select(SQL, Params).
+       
+get_device_type(EqptClasses) ->
+    SQL = lists:concat(["SELECT eqpt_type, eqpt_type_name FROM eqpt_type WHERE eqpt_class IN (", EqptClasses, ");"]),
+    Params = [],
+    exec_select(SQL, Params).
+    
+get_collector(BuildingId, DeviceTypes) ->
+    SQL = lists:concat(["SELECT a.eqpt_id_code, a.eqpt_name, a.eqpt_type, c.eqpt_type_name, b.eqpt_building_name, ", 
+                        "a.create_time FROM eqpt_info as a, eqpt_building as b, eqpt_type as c WHERE ",
+                        "a.eqpt_building_id = b.eqpt_building_id and c.eqpt_type = a.eqpt_type and ",
+                        "a.eqpt_type IN (", DeviceTypes, ")", " and a.eqpt_building_id like \"", BuildingId, "%\";"]),
+    Params = [],
+    exec_select(SQL, Params).
+
+get_building(BuildingId, Level) ->
+    Level1 = length(BuildingId) div 4 - 1, 
+    SQLTmp = "SELECT eqpt_building_id, eqpt_building_name, eqpt_parent_id FROM eqpt_building WHERE ",
+    SQL = 
+        case Level of
+            "all" ->
+                Condition = "eqpt_building_id like \"" ++ BuildingId ++ "%\";",
+                lists:concat([SQLTmp, Condition]);
+            _ ->
+                Condition = lists:concat(["eqpt_building_level BETWEEN ", integer_to_list(Level1), " AND ", 
+                                          integer_to_list(list_to_integer(Level)+Level1), " AND eqpt_building_id like \"",
+                                          BuildingId, "%\";"]),
+                lists:concat([SQLTmp, Condition])
+        end,
+    ?PRINT("SQL: ~p~n", [SQL]),
+    Params = [],
+    exec_select(SQL, Params).
+
+get_meter(BuildingId, DeviceTypes) ->
+    SQL = lists:concat(["SELECT a.eqpt_id_code, a.eqpt_name, a.eqpt_type, d.eqpt_type_name, c.upper_eqpt_id_code, ",
+                        "b.eqpt_building_name, a.create_time, a.eqpt_label, a.eqpt_tab, c.eqpt_status, a.eqpt_baudrate, ",
+                        "a.eqpt_commport, a.eqpt_shortnum FROM eqpt_info as a ",
+                        "LEFT JOIN eqpt_building as b ON a.eqpt_building_id = b.eqpt_building_id ",
+                        "LEFT JOIN network_config as c ON a.eqpt_id_code = c.eqpt_id_code ",
+                        "LEFT JOIN eqpt_type as d ON a.eqpt_type = d.eqpt_type ",
+                        "WHERE a.eqpt_type IN (", DeviceTypes, ") AND a.eqpt_building_id like \"", BuildingId, "%\""]),
+    Params = [],
+    exec_select(SQL, Params).
+
+get_meter_by_collector(DeviceId, MeterTypes) ->
+    SQL = lists:concat(["SELECT a.eqpt_id_code, a.eqpt_type, b.eqpt_name, a.eqpt_status, b.eqpt_shortnum FROM network_config a ",
+                        "LEFT JOIN eqpt_info b ON b.eqpt_id_code = a.eqpt_id_code "
+                        "WHERE (a.upper_eqpt_id_code = \"", DeviceId, "\" OR a.upper_eqpt_id_code IN ",
+                        "(SELECT eqpt_id_code FROM network_config WHERE upper_eqpt_id_code = \"", DeviceId , "\")) AND ",
+                        "a.eqpt_type IN (", MeterTypes, ");"]),
+    Params = [],
+    exec_select(SQL, Params).
+
+add_collector(DeviceId, DeviceName, DeviceType, BuildingId) ->
+    case is_exists_eqpt(DeviceId) of
+        true ->
+            {error, "already existing"};
+        {error, Reason} ->
+            {error, Reason};
+        false ->
+            SQL1 = <<"SELECT max(seq) FROM eqpt_info;">>,
+            SQL2 = <<"SELECT max(seq) FROM network_config;">>,
+            Params1 = Params2 = [],
+            SQL3 = <<"SELECT ProtocolFile FROM system_Protocol as a, eqpt_type as b  WHERE", 
+                     " a.ProtocolID = b.protocolid AND b.eqpt_type = :eqpt_type LIMIT 1;">>,
+            Params3 = [{":eqpt_type", DeviceType}],
+            case {exec_select(SQL1, Params1), exec_select(SQL2, Params2), exec_select(SQL3, Params3)}  of
+                {{ok, [{Seq1Tmp}]}, {ok, [{Seq2Tmp}]}, {ok, [{ProtocolType}]}} ->
+                    ?PRINT("Seq1: ~p Seq2: ~p~n", [Seq1Tmp, Seq2Tmp]),
+                    DatetimeStr = ?HELPER:datetime_string(),
+                    
+                    SQLInsert1 = <<"INSERT INTO eqpt_info (seq, eqpt_code, eqpt_name, eqpt_type, eqpt_id_code, ", 
+                                   "create_time, eqpt_baudrate, eqpt_protocoltype, eqpt_commport, eqpt_pfc, ",
+                                   "eqpt_rate, eqpt_zsw, eqpt_xsw, eqpt_dlh, eqpt_xlh, eqpt_building_id) ",
+                                   "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);">>,
+                    ParamsInsert1 = [
+                                     {1, Seq1Tmp+1}, {2, DeviceId}, {3, DeviceName}, {4, DeviceType},
+                                     {5, DeviceId}, {6, DatetimeStr}, {7, "2400bps"}, {8, ProtocolType},
+                                     {9, "1F"}, {10, "0"}, {11, "4"}, {12, "5"},
+                                     {13, "2"}, {14, "5"}, {15, "1"}, {16, BuildingId}
+                                    ],
+                    SQLInsert2 = <<"INSERT INTO network_config(seq, comm_level, eqpt_type, eqpt_id_code, ",
+                                   "eqpt_upward_port, eqpt_upward_protocol, upper_eqpt_id_code, upper_eqpt_port, ",
+                                   "create_time, OutTime, upper_eqpt_type, eqpt_measurecode, dll_prefix) VALUES ",
+                                   "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);">>,
+                    ParamsInsert2 = [
+                                     {1, Seq2Tmp+1}, {2, "1"}, {3, DeviceType}, {4, DeviceId},
+                                     {5, "1F"}, {6, ProtocolType}, {7, "101680010209526"}, {8, "1F"},
+                                     {9, DatetimeStr}, {10, "30"}, {11, "0a00001001"}, {12, "0"},
+                                     {13, ProtocolType}
+                                    ],
+                    ResultInsert1 = exec_insert(SQLInsert1, ParamsInsert1),
+                    ResultInsert2 = exec_insert(SQLInsert2, ParamsInsert2),
+                    ?PRINT("Eqpt_info ResultInsert: ~p~n", [ResultInsert1]),
+                    ?PRINT("Network_config ResultInsert: ~p~n", [ResultInsert2]),
+                    case {ResultInsert1, ResultInsert2} of
+                        {{ok, _RowId1}, {ok, _RowId2}} ->
+                            ok;
+                        _ ->
+                            {error, {ResultInsert1, ResultInsert2}}
+                    end;
+                Other ->
+                    ?PRINT("~p:~p : ~p~n", [?FILE, ?LINE, Other]),
+                    {error, "select seq or protocol failure"}
+            end
+    end.
+
+update_collector(DeviceId, DeviceName, DeviceType, BuildingId) ->
+    SQL1 = <<"SELECT ProtocolFile FROM system_Protocol as a, eqpt_type as b  WHERE", 
+             " a.ProtocolID = b.protocolid AND b.eqpt_type = :eqpt_type LIMIT 1;">>,
+    Params1 = [{":eqpt_type", DeviceType}],
+    case exec_select(SQL1, Params1) of
+        {ok, [{ProtocolType}]} ->
+            SQLUpdate1 = <<"UPDATE eqpt_info SET eqpt_name = :eqpt_name, eqpt_type = :eqpt_type, ",
+                           "eqpt_protocoltype = :eqpt_protocoltype, eqpt_building_id = :eqpt_building_id ",
+                           "WHERE eqpt_id_code = :eqpt_id_code;">>,
+            ParamsUpdate1 = [{":eqpt_name", DeviceName}, {":eqpt_type", DeviceType}, 
+                             {":eqpt_protocoltype", ProtocolType}, {":eqpt_building_id", BuildingId},
+                             {":eqpt_id_code", DeviceId}],
+            SQLUpdate2 = <<"UPDATE network_config SET eqpt_type = :eqpt_type, eqpt_upward_protocol = ", 
+                           ":eqpt_upward_protocol, dll_prefix = :dll_prefix WHERE eqpt_id_code = :eqpt_id_code;">>,
+            ParamsUpdate2 = [{":eqpt_type", DeviceType}, {":eqpt_upward_protocol", ProtocolType},
+                             {":dll_prefix", ProtocolType}, {":eqpt_id_code", DeviceId}],
+            ResultUpdate1 = exec_update(SQLUpdate1, ParamsUpdate1),
+            ResultUpdate2 = exec_update(SQLUpdate2, ParamsUpdate2),
+            ?PRINT("Eqpt_info ResultUpdate: ~p~n", [ResultUpdate1]),
+            ?PRINT("Network_config ResultUpdate: ~p~n", [ResultUpdate2]),
+            case {ResultUpdate1, ResultUpdate2} of
+                {ok, ok} ->
+                    ok;
+                Other1 ->
+                    ?PRINT("~p:~p : ~p~n", [?FILE, ?LINE, Other1]),
+                    {error, "update failure"}
+            end;
+        Other ->
+            ?PRINT("~p:~p : ~p~n", [?FILE, ?LINE, Other]),
+            {error, "select protocol failure"}
+    end.
+
+delete_collector(DeviceId, DeviceType) ->
+    case is_exists_child_device(DeviceId) of
+        {error, Reason} ->
+            {error, Reason};
+        true ->
+            {error, "exists child device"};
+        false ->
+            SQLDelete1 = <<"DELETE FROM eqpt_info WHERE eqpt_id_code = :eqpt_id_code OR eqpt_id_code IN (SELECT eqpt_id_code FROM "
+                           "network_config WHERE upper_eqpt_id_code = :eqpt_id_code);">>,
+            ParamsDelete1 = [{":eqpt_id_code", DeviceId}],
+            SQLDelete2 = <<"DELETE FROM network_config WHERE eqpt_id_code = :eqpt_id_code OR upper_eqpt_id_code = ",
+                           ":eqpt_id_code;">>,
+            ParamsDelete2 = [{":eqpt_id_code", DeviceId}],
+            ResultDelete1 = exec_delete(SQLDelete1, ParamsDelete1),
+            ResultDelete2 = exec_delete(SQLDelete2, ParamsDelete2),
+            ?PRINT("Eqpt_info ResultDelete: ~p~n", [ResultDelete1]),
+            ?PRINT("Network_config ResultDelete: ~p~n", [ResultDelete2]),
+            case {ResultDelete1, ResultDelete2} of
+                {ok, ok} ->
+                    ok;
+                Other ->
+                    ?PRINT("~p:~p : ~p~n", [?FILE, ?LINE, Other]),
+                    {error, "delete failure"}
+            end
+    end.
+
+is_exists_child_device(DeviceId) ->
+    SQL = <<"SELECT count(seq) FROM network_config WHERE upper_eqpt_id_code = :eqpt_id_code;">>,
+    Params = [{":eqpt_id_code", DeviceId}],
+    case exec_select(SQL, Params) of
+        {ok, [{CountDevice}]} when(CountDevice > 0) ->
+            true;
+        {ok, _}->
+            false;
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+update_eqpt_status(MeterIds, Status) ->
+    SQL = lists:concat(["UPDATE network_config SET eqpt_status = ", Status, " WHERE eqpt_id_code IN (", MeterIds, ");"]),
+    Params = [],
+    exec_update(SQL, Params).
+
+init_archive(DeviceId, DeviceType) ->
+    Status = 0,
+    SQL = lists:concat(["UPDATE network_config SET eqpt_status = ", Status, " WHERE upper_eqpt_id_code = \"", DeviceId, 
+                        "\" AND upper_eqpt_type = \"", DeviceType, "\";"]),
+    Params = [],
+    exec_update(SQL, Params).
+
+update_short_number(MeterId, ShortNumber) ->
+    SQL = lists:concat(["UPDATE eqpt_info SET eqpt_shortnum = \"", ShortNumber, "\" WHERE eqpt_id_code = \"", MeterId, "\";"]),
+    Params = [],
+    exec_update(SQL, Params).
+
+add_meter(DeviceId, DeviceName, DeviceType, DeviceLabel, BuildingId, CollectorId, DeviceTab, Baudrate, Commport) ->
+    case is_exists_eqpt(DeviceId) of
+        true ->
+            {error, "already existing"};
+        {error, Reason} ->
+            {error, Reason};
+        false ->
+            %% 查找该设备类型的协议类型及表类型（电表/水表）
+            SQL1 = <<"SELECT a.ProtocolFile, b.eqpt_yblx FROM system_Protocol a, eqpt_type b WHERE a.ProtocolID = ",
+                     "b.protocolid AND b.eqpt_type = :eqpt_type LIMIT 1;">>,
+            Params1 = [{":eqpt_type", DeviceType}],
+            %% 查找上层设备的设备命令级别
+            SQL2 = <<"SELECT comm_level FROM network_config WHERE eqpt_id_code = :eqpt_id_code;">>,
+            Params2 = [{":eqpt_id_code", CollectorId}],
+            ResultSelect1 = exec_select(SQL1, Params1),
+            ResultSelect2 = exec_select(SQL2, Params2),
+            ?PRINT("ResultSelect1: ~p~n", [ResultSelect1]),
+            ?PRINT("ResultSelect2: ~p~n", [ResultSelect2]),
+            case {ResultSelect1, ResultSelect2} of
+                {{ok, [{ProtocolType, EqptYblx}]}, {ok, [{CommLevel}]}} ->
+                    %% 查找采集器上级设备的协议类型，设备类型，设备号
+                    {SQL3, Params3} = 
+                        case CommLevel of
+                            1 ->
+                                {<<"SELECT eqpt_upward_protocol, eqpt_type, eqpt_id_code FROM network_config WHERE ",
+                                  "eqpt_id_code = :eqpt_id_code LIMIT 1;">>,
+                                 [{":eqpt_id_code", CollectorId}]};
+                            2 ->
+                                {<<"SELECT eqpt_upward_protocol, eqpt_type, eqpt_id_code FROM network_config WHERE ",
+                                   "eqpt_id_code = (SELECT upper_eqpt_id_code FROM network_config WHERE ",
+                                   "eqpt_id_code = :eqpt_id_code LIMIT 1) LIMIT 1;">>, [{":eqpt_id_code", CollectorId}]}
+                        end,
+                    ResultSelect3 = exec_select(SQL3, Params3),
+                    ?PRINT("ResultSelect3: ~p~n", [ResultSelect3]),
+                    case ResultSelect3 of
+                        {ok, [{UpperProtocolType, UpperEqptType, UpperEqptIdCode}]} ->
+                            %% 测量点号
+                            case gen_measurecode(UpperEqptType, UpperEqptIdCode) of
+                                {error, Reason} ->
+                                    {error, Reason};
+                                {ok, Measurecode} ->
+                                    ?PRINT("Measurecode: ~p~n", [Measurecode]),
+                                    SQL4 = <<"SELECT max(seq) FROM eqpt_info;">>,
+                                    SQL5 = <<"SELECT max(seq) FROM network_config;">>,
+                                    Params4 = Params5 = [],
+                                    case {exec_select(SQL4, Params4), exec_select(SQL5, Params5)}  of
+                                        {{ok, [{Seq1Tmp}]}, {ok, [{Seq2Tmp}]}} ->
+                                            DatetimeStr = ?HELPER:datetime_string(),
+                                            SQLInsert1 = <<"INSERT INTO eqpt_info (seq, eqpt_code, eqpt_name, eqpt_type, ",
+                                                           "eqpt_id_code, create_time, eqpt_baudrate, eqpt_protocoltype, ",
+                                                           "eqpt_commport, eqpt_pfc, eqpt_rate, eqpt_zsw, eqpt_xsw, eqpt_dlh, ",
+                                                           "eqpt_xlh, eqpt_yblx, eqpt_building_id, eqpt_label, eqpt_tab) VALUES ",
+                                                           "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"
+                                                         >>,
+                                            ParamsInsert1Tmp = [Seq1Tmp+1, DeviceId, DeviceName, DeviceType, DeviceId, DatetimeStr,
+                                                                Baudrate, ProtocolType, Commport, 0, 4, 5, 2, 5, 1, EqptYblx, 
+                                                                BuildingId, "", ""],
+                                            ParamsInsert1 = [{1, Seq1Tmp+1}, {2, DeviceId}, {3, DeviceName}, {4, DeviceType},
+                                                             {5, DeviceId}, {6, DatetimeStr}, {7, Baudrate}, {8, ProtocolType},
+                                                             {9, Commport}, {10, 0}, {11, 4}, {12, 5}, 
+                                                             {13, 2}, {14, 5}, {15, 1}, {16, EqptYblx}, 
+                                                             {17, BuildingId}, {18, DeviceLabel}, {19, DeviceTab}
+                                                            ],
+                                            SQLInsert2 = <<"INSERT INTO network_config (seq, comm_level, eqpt_type, eqpt_id_code, ",
+                                                           "eqpt_status, eqpt_upward_port, eqpt_upward_protocol, upper_eqpt_id_code, ",
+                                                           "upper_eqpt_port, create_time, OutTime, upper_eqpt_type, eqpt_measurecode, ",
+                                                           "dll_prefix) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"
+                                                         >>,
+                                            DLLPrefix = binary:list_to_bin([ProtocolType,  <<"_">>,  UpperProtocolType]), 
+                                            ParamsInsert2 = [{1, Seq2Tmp+1}, {2, CommLevel+1}, {3, DeviceType}, {4, DeviceId},
+                                                             {5, "0"}, {6, "1F"}, {7, ProtocolType}, {8, CollectorId},
+                                                             {9, Commport}, {10, DatetimeStr}, {11, "30"}, {12, UpperEqptType},
+                                                             {13, Measurecode}, {14, DLLPrefix}],
+                                            ResultInsert1 = exec_insert(SQLInsert1, ParamsInsert1),
+                                            ResultInsert2 = exec_insert(SQLInsert2, ParamsInsert2),
+                                            ?PRINT("eqpt_info ResultInsert: ~p~n", [ResultInsert1]),
+                                            ?PRINT("network_config_info ResultInsert: ~p~n", [ResultInsert2]),
+                                            case {ResultInsert1, ResultInsert2} of
+                                                {{ok, _Row1}, {ok, _Row2}} ->
+                                                    ok;
+                                                OtherInsert ->
+                                                    ?PRINT("~p:~p : ~p~n", [?FILE, ?LINE, OtherInsert]),
+                                                    {error, "insert failure"}
+                                            end;
+                                        OtherSelect ->
+                                            ?PRINT("~p:~p : ~p~n", [?FILE, ?LINE, OtherSelect]),
+                                            {error, "select seq failure"}
+                                    end
+                                end;
+                        _ ->
+                            {error, "select upper info failure"}
+                    end;
+                Other ->
+                    ?PRINT("~p:~p : ~p~n", [?FILE, ?LINE, Other]),
+                    {error, "select protocol or comm_level failure"}
+            end
+    end.
+
+update_meter(DeviceId, DeviceName, BuildingId, DeviceTab, DeviceLabel,  
+                               Baudrate, Commport) ->
+    SQL = <<"UPDATE eqpt_info SET eqpt_name = :eqpt_name, eqpt_building_id = :eqpt_building_id, eqpt_tab = :eqpt_tab, ",
+            "eqpt_label = :eqpt_label, eqpt_baudrate = :eqpt_baudrate, eqpt_commport = :eqpt_commport WHERE eqpt_id_code = ",
+            ":eqpt_id_code;">>,
+    Params = [{":eqpt_name", DeviceName}, {":eqpt_building_id", BuildingId}, {":eqpt_tab", DeviceTab}, 
+              {":eqpt_label", DeviceLabel}, {":eqpt_baudrate", Baudrate}, {":eqpt_commport", Commport},
+             {":eqpt_id_code", DeviceId}],
+    ResultUpdate = exec_update(SQL, Params),
+    ?PRINT("ResultUpdate: ~p~n", [ResultUpdate]),
+    case ResultUpdate of
+        ok ->
+            ok;
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+delete_meter(DeviceId, DeviceType) ->
+    SQL1 = <<"DELETE FROM eqpt_info WHERE eqpt_id_code = :eqpt_id_code;">>,
+    Params1 = [{":eqpt_id_code", DeviceId}],
+    SQL2 = <<"DELETE FROM network_config WHERE eqpt_id_code = :eqpt_id_code;">>,
+    Params2 = [{":eqpt_id_code", DeviceId}],
+    ResultDelete1 = exec_delete(SQL1, Params1),
+    ResultDelete2 = exec_delete(SQL2, Params2),
+    ?PRINT("eqpt_info ResultDelete: ~p~n", [ResultDelete1]),
+    ?PRINT("network_config ResultDelete: ~p~n", [ResultDelete2]),
+    case {ResultDelete1, ResultDelete2} of
+        {ok, ok} ->
+            ok;
+        Other ->
+            ?PRINT("~p:~p : ~p~n", [?FILE, ?LINE, Other]),
+            {error, "delete is failure"}
+    end.
+
+delete_meter_by_collector(DeviceId, DeviceType) ->
+    SQL1 = <<"DELETE FROM eqpt_info WHERE eqpt_id_code in (SELECT eqpt_id_code FROM ",
+             "network_config WHERE network_config.upper_eqpt_id_code = :upper_eqpt_id_code ",
+             "AND network_config.upper_eqpt_type = :upper_eqpt_type);">>,
+    Params1 = [{":upper_eqpt_id_code", DeviceId}, {":upper_eqpt_type", DeviceType}],
+    SQL2 = <<"DELETE FROM network_config WHERE upper_eqpt_id_code = :upper_eqpt_id_code AND ",
+             "upper_eqpt_type = :upper_eqpt_type;">>,
+    Params2 = Params1,
+    ResultDelete1 = exec_delete(SQL1, Params1),
+    ResultDelete2 = exec_delete(SQL2, Params2),
+    ?PRINT("eqpt_info ResultDelete: ~p~n", [ResultDelete1]),
+    ?PRINT("network_config ResultDelete: ~p~n", [ResultDelete2]),
+    case {ResultDelete1, ResultDelete2} of
+        {ok, ok} ->
+            ok;
+        Other ->
+            ?PRINT("~p:~p : ~p~n", [?FILE, ?LINE, Other]),
+            {error, "delete is failure"}
+    end.
+
+add_building(BuildingParentId, BuildingName) ->
+    case is_exists_building(BuildingName) of
+        true ->
+            {error, "already exists buildingname"}; 
+        {error, Reason} ->
+            {error, Reason};
+        false ->
+            case gen_building_id(BuildingParentId) of
+                {ok, BuildingId} ->
+                    case gen_building_level(BuildingParentId) of
+                        {ok, BuildingLevel} ->
+                            SQL = <<"INSERT INTO eqpt_building (eqpt_building_id, eqpt_building_name, eqpt_parent_id, ",
+                                    "eqpt_building_level, create_time) VALUES (?, ?, ?, ?, ?);">>,
+                            Params = [{1, BuildingId},
+                                      {2, BuildingName},
+                                      {3, BuildingParentId},
+                                      {4, BuildingLevel},
+                                      {5, ?HELPER:datetime_string()}
+                                     ],
+
+                            ResultInsert = exec_insert(SQL, Params),
+                            ?PRINT("ResultInsert: ~p~n", [ResultInsert]),
+                            case ResultInsert of
+                                {ok, _Rowid} ->
+                                    ok;
+                                {error, Reason} ->
+                                    {error, Reason}
+                            end;
+                        {error, Reason} ->
+                            {error, Reason}
+                    end;
+                {error, Reason} ->
+                    {error, Reason}
+            end
+    end.
+
+update_building(BuildingId, BuildingName) ->
+    SQL = <<"UPDATE eqpt_building SET eqpt_building_name = :eqpt_building_name WHERE eqpt_building_id = :eqpt_building_id;">>,
+    Params = [{":eqpt_building_id", BuildingId}, {":eqpt_building_name", BuildingName}],
+    exec_update(SQL, Params).
+    
+delete_building(BuildingId) ->
+    SQL1 = <<"SELECT count(seq) FROM eqpt_building WHERE eqpt_parent_id = :eqpt_parent_id;">>,
+    Params1 = [{":eqpt_parent_id", BuildingId}],
+    SQL2 = <<"SELECT count(seq) FROM eqpt_info WHERE eqpt_building_id = :eqpt_building_id;">>,
+    Params2 = [{":eqpt_building_id", BuildingId}],
+    ResultSelect1 = exec_select(SQL1, Params1),
+    ResultSelect2 = exec_select(SQL2, Params2),
+    ?PRINT("eqpt_building ResultSelect: ~p~n", [ResultSelect1]),
+    ?PRINT("eqpt_info ResultSelect: ~p~n", [ResultSelect2]),
+    case {ResultSelect1, ResultSelect2} of
+        {{ok, [{CountChildBuilding}]}, _} when (CountChildBuilding > 0) ->
+            {error, "exists child building"};
+        {_, {ok, [{CountDevice}]}} when (CountDevice > 0) ->
+            {error, "exists device"};
+        {{ok, [{0}]}, {ok, [{0}]}} ->
+            SQLDelete = <<"DELETE FROM eqpt_building WHERE eqpt_building_id = :eqpt_building_id;">>,
+            ParamsDelete = [{":eqpt_building_id", BuildingId}],
+            exec_delete(SQLDelete, ParamsDelete);
+        Other ->
+            ?PRINT("~p:~p Other : ~p~n", [?FILE, ?LINE, Other]),
+            {error, "select count(seq) failure"}
+    end.
+
+gen_building_level(BuildingParentId) ->
+    SQL = <<"SELECT eqpt_building_level FROM eqpt_building WHERE eqpt_building_id = :eqpt_parent_id LIMIT 1;">>,
+    Params = [{":eqpt_parent_id", BuildingParentId}],
+    case exec_select(SQL, Params) of
+        {ok, []} ->
+            {ok, 0};
+        {ok, [{Level}]} ->
+            {ok, Level+1};
+        {error, Reason} ->
+            {error, Reason}
+    end.
+        
+gen_building_id(EqptParentId) ->
+    SQL = <<"SELECT eqpt_building_id FROM eqpt_building WHERE eqpt_parent_id = :eqpt_parent_id ORDER BY eqpt_building_id ",
+            "DESC LIMIT 1;">>,
+    Params = [{":eqpt_parent_id", EqptParentId}],
+    EqptBuildingIdTail = 
+        case exec_select(SQL, Params) of
+            {ok, []} ->
+                {ok, "0001"};
+            {ok, [{EqptBuildingIdBin}]} ->
+                EqptBuildingId = binary_to_list(EqptBuildingIdBin),
+                EqptBuildingIdTmp1 = lists:reverse(lists:sublist(lists:reverse(EqptBuildingId), 4)),
+                EqptBuildingIdTmp2 = io_lib:format("~4..0w", [(list_to_integer(EqptBuildingIdTmp1)+1)]),
+                {ok, EqptBuildingIdTmp2};
+            {error, Reason} ->
+                {error, Reason}
+        end,
+    case EqptBuildingIdTail of
+        {ok, Tail} ->
+            case EqptParentId of
+                "0" ->
+                    {ok, Tail};
+                _ ->
+                    {ok, lists:flatten(EqptParentId ++ Tail)}
+            end;
+        {error, What} ->
+            {error, What}
+    end.
+                                    
+gen_measurecode(UpperEqptType, UpperEqptIdCode) ->
+    SQL = <<"SELECT eqpt_measurecode FROM network_config WHERE upper_eqpt_id_code = :eqpt_id_code OR ",
+            "upper_eqpt_id_code IN (SELECT eqpt_id_code FROM network_config WHERE upper_eqpt_id_code = ",
+            ":eqpt_id_code) AND upper_eqpt_type = :eqpt_type ORDER BY eqpt_measurecode DESC LIMIT 1;">>,
+    Params = [{":eqpt_id_code", UpperEqptIdCode}, {":eqpt_type", UpperEqptType}],
+    Result = exec_select(SQL, Params),
+    ?PRINT("RESULT: ~p~n", [Result]),
+    case Result of
+        {ok, []} ->
+            {ok, 4};
+        {ok, [{Measurecode}]} ->
+            {ok, Measurecode+1};
+        {error, Reason} ->
+                {error, Reason}
+    end.
+
+get_measurecode_by_meter(MeterIds) ->
+    SQL = lists:concat(["SELECT eqpt_id_code, eqpt_measurecode FROM network_config WHERE eqpt_id_code IN (", 
+                        MeterIds, ");"]),
+    Params = [],
+    exec_select(SQL, Params).
+    
+
+get_measurecode(MeterId) ->
+    SQL = <<"SELECT eqpt_measurecode FROM network_config WHERE eqpt_id_code = :eqpt_id_code;">>,
+    Params = [{":eqpt_id_code", MeterId}],
+    case exec_select(SQL, Params) of
+        {ok, [{Measurecode}]} when is_integer(Measurecode)->
+            {ok, Measurecode};
+        {error, Reason} ->
+            {error, Reason};
+        Other ->
+            {error, Other} 
+    end.
+
+    
+    

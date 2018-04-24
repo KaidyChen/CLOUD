@@ -1,0 +1,492 @@
+-module(db_rest_handler).
+
+-include("print.hrl").
+-include("config.hrl").
+
+-export([init/2]).
+-export([allowed_methods/2]).
+-export([allow_miss_port/2]).
+-export([content_types_provided/2]).
+-export([content_types_accepted/2]).
+
+-define(SUCCESS_STATUS, <<"200">>).
+-define(FAILURE_STATUS, <<"300">>).
+
+-export([
+         response_to_json/2, 
+         response_to_html/2, 
+         response_to_text/2
+        ]).
+
+-export([
+         get_device_type/1,
+         get_meter_by_collector/1,
+         get_measurecode_by_meter/1,
+
+         get_collector/1,
+         add_collector/1,
+         update_collector/1,
+         delete_collector/1,
+
+         get_meter/1,
+         add_meter/1,
+         update_meter/1,
+         delete_meter/1,
+         delete_meter_by_collector/1,
+
+         get_building/1,
+         add_building/1,
+         update_building/1,
+         delete_building/1,
+
+         download_archive/1,
+         delete_archive/1,
+         init_archive/1,
+
+         update_short_number/1,
+         
+         add_meters/1,
+         add_collectors/1,
+
+         hello/1
+        ]).
+
+init(Req, State) ->
+    ?PRINT("REQ: ~p~n", [Req]),
+    {cowboy_rest, Req, State}.
+
+allowed_methods(Req, State) ->
+    Result = [<<"GET">>, <<"POST">>, <<"HEAD">>, <<"OPTIONS">>],
+    {Result, Req, State}.
+
+allow_miss_port(Req, State) ->
+    Result = false,
+    {Result, Req, State}.
+
+content_types_provided(Req, State) ->
+    Result = [
+             % {<<"text/html">>,  response_to_html},
+             % {<<"text/plain">>, response_to_text},
+             % {<<"application/x-www-form-urlencoded">>, response_to_json},
+              {<<"application/json">>,  response_to_json}
+             ],
+    {Result, Req, State}.
+
+content_types_accepted(Req, State) ->
+    Result = [
+              {<<"application/x-www-form-urlencoded">>, response_to_json},
+              {<<"application/json">>,  response_to_json}
+             ],
+    {Result, Req, State}.
+
+response_to_json(Req, State) ->
+    ?PRINT("response: ~n", []),
+    Path = cowboy_req:path(Req),
+    Method = cowboy_req:method(Req),
+    {NewReq, Qs} = 
+        case cowboy_req:has_body(Req) of
+            true ->
+                {ok, Body, ReqTmp} = cowboy_req:read_body(Req),
+                ?PRINT("Body: ~p~n", [Body]),
+                {ReqTmp, jsx:decode(Body)};
+            false ->
+                {Req, cowboy_req:parse_qs(Req)}
+        end,
+
+    Result = get_result(Path, Qs),
+    ?PRINT("Result:~s~n", [binary_to_list(Result)]),
+
+    ?PRINT("Pid: ~p~n", [self()]),
+    ?PRINT("Path: ~p~n", [Path]),
+    ?PRINT("Qs: ~p~n", [Qs]),
+
+    case Method of
+        <<"POST">> ->
+            Res1 = cowboy_req:set_resp_body(Result, NewReq),
+            Res2 = cowboy_req:delete_resp_header(<<"content-type">>, Res1),
+            Res3 = cowboy_req:set_resp_header(<<"content-type">>, <<"application/json">>, Res2),
+            {true, Res3, State};
+        _ ->
+            {Result, NewReq, State}
+    end.
+
+response_to_html(Req, State) ->
+    Result = <<"<html>
+<body>
+               <p>REST Hello World as HTML!</p>
+               </body>
+               </html>">>,
+    {Result, Req, State}.
+
+response_to_text(Req, State) ->
+    Result = <<"Hello World!">>,
+    {Result, Req, State}.
+
+get_result(Path, Qs) ->
+    Fun = proplists:get_value(Path, ?PATH_TO_FUN, hello),
+    ?PRINT("Fun: ~p~n", [Fun]),
+    apply(?MODULE, Fun, [Qs]).
+
+hello(Qs) ->
+    Result = <<"{\"rest\": \"Hello World！\"}">>.
+
+notify_update_eqpt_info() ->
+    connector_db_store_server:notify_update_eqpt_info().
+
+get_device_type(Qs) ->
+    DeviceClasses = binary_to_list(proplists:get_value(<<"deviceClasses">>, Qs, <<>>)), 
+    case db_util:get_device_type(DeviceClasses) of
+        {ok, []} ->
+            <<"[]">>;
+        {ok, Rows} ->
+            List = [[{<<"eqptType">>, EqptType}, {<<"eqptName">>, EqptName}] || {EqptType, EqptName} <- field_format(Rows)],
+            jsx:encode(List);
+        {error, Reason} ->
+            format_return(Reason, ?FAILURE_STATUS)
+    end.
+
+get_collector(Qs) ->
+    BuildingId = binary_to_list(proplists:get_value(<<"buildingId">>, Qs, <<>>)),
+    DeviceTypes = binary_to_list(proplists:get_value(<<"deviceTypes">>, Qs, <<>>)),
+    case db_util:get_collector(BuildingId, DeviceTypes) of
+        {ok, []} ->
+            <<"[]">>;
+        {ok, Rows} ->
+            List = [[
+                     {<<"eqptIdCode">>, EqptIdCode}, 
+                     {<<"eqptType">>, EqptType},
+                     {<<"eqptName">>, EqptName},
+                     {<<"eqptTypeName">>, EqptTypeName},
+                     {<<"eqptBuildingName">>, EqptBuildingName},
+                     {<<"createTime">>, CreateTime}
+                    ] || {EqptIdCode, EqptName, EqptType, EqptTypeName, EqptBuildingName, CreateTime} <- field_format(Rows)],
+            jsx:encode(List);
+        {error, Reason} ->
+            format_return(Reason, ?FAILURE_STATUS)
+    end.
+
+get_building(Qs) ->
+    BuildingId = binary_to_list(proplists:get_value(<<"buildingId">>, Qs, <<>>)),
+    Level = binary_to_list(proplists:get_value(<<"level">>, Qs, <<>>)),
+    case db_util:get_building(BuildingId, Level) of
+        {ok, []} ->
+            <<"[]">>;
+        {ok, Rows} ->
+            List = [[
+                     {<<"buildingId">>, BuildingIdTmp}, 
+                     {<<"buildingName">>, BuildingName},
+                     {<<"parentId">>, ParentId}
+                    ] || {BuildingIdTmp, BuildingName, ParentId} <- field_format(Rows)],
+            jsx:encode(List);
+        {error, Reason} ->
+            format_return(Reason, ?FAILURE_STATUS)
+    end.
+
+get_meter(Qs) ->
+    BuildingId = binary_to_list(proplists:get_value(<<"buildingId">>, Qs, <<>>)),
+    DeviceTypes = binary_to_list(proplists:get_value(<<"deviceTypes">>, Qs, <<>>)),
+    case db_util:get_meter(BuildingId, DeviceTypes) of
+        {ok, []} ->
+            <<"[]">>;
+        {ok, Rows} ->
+            ?PRINT("Rows: ~p~n", [Rows]),
+            List = [[
+                     {<<"eqptIdCode">>, EqptIdCode}, 
+                     {<<"eqptName">>, EqptName},
+                     {<<"commport">>, Commport}, 
+                     {<<"baudrate">>, Baudrate},
+                     {<<"eqptType">>, EqptType}, 
+                     {<<"eqptTypeName">>, EqptTypeName},
+                     {<<"eqptBuildingName">>, EqptBuildingName}, 
+                     {<<"collector">>, Collector},
+                     {<<"label">>, EqptLabel}, 
+                     {<<"tab">>, EqptTab},
+                     {<<"createTime">>, CreateTime}, 
+                     {<<"eqptStatus">>, EqptStatus},
+                     {<<"eqptShortNum">>, EqptShortNum} 
+                    ] || {EqptIdCode, EqptName, EqptType, EqptTypeName, Collector, EqptBuildingName, CreateTime, 
+                          EqptLabel, EqptTab, EqptStatus, Baudrate, Commport, EqptShortNum} <- field_format(Rows)],
+            jsx:encode(List);
+        {error, Reason} ->
+            format_return(Reason, ?FAILURE_STATUS)
+    end.
+
+get_measurecode_by_meter(Qs) ->
+    MeterIds = binary_to_list(proplists:get_value(<<"meterIds">>, Qs, <<>>)),
+    case db_util:get_measurecode_by_meter(MeterIds) of
+        {ok, []} ->
+            <<"[]">>;
+        {ok, Rows} ->
+            List = [[{<<"meterId">>, MeterId}, {<<"measurecode">>, Measurecode}] 
+                    || {MeterId, Measurecode} <- field_format(Rows)],
+            jsx:encode(List);
+        {error, Reason} ->
+            format_return(Reason, ?FAILURE_STATUS)
+    end.
+
+get_meter_by_collector(Qs) ->
+    DeviceId = binary_to_list(proplists:get_value(<<"deviceId">>, Qs, <<>>)),
+    MeterTypes = binary_to_list(proplists:get_value(<<"meterTypes">>, Qs, <<>>)),
+    case db_util:get_meter_by_collector(DeviceId, MeterTypes) of
+        {ok, []} ->
+            <<"[]">>;
+        {ok, Rows} ->
+            List = [[{<<"eqptIdCode">>, EqptIdCode},
+                     {<<"eqptType">>, EqptType},
+                     {<<"eqptName">>, EqptName},
+                     {<<"eqptStatus">>, EqptStatus},
+                     {<<"eqptShortNum">>, EqptShortNum} 
+                    ] 
+                    || {EqptIdCode, EqptType, EqptName, EqptStatus, EqptShortNum} <- field_format(Rows)],
+            jsx:encode(List);
+        {error, Reason} ->
+            format_return(Reason, ?FAILURE_STATUS)
+    end.
+
+add_collector(Qs) ->
+    DeviceId = binary_to_list(proplists:get_value(<<"deviceId">>, Qs, <<>>)),
+    DeviceName = binary_to_list(proplists:get_value(<<"deviceName">>, Qs, <<>>)),
+    DeviceType = binary_to_list(proplists:get_value(<<"deviceType">>, Qs, <<>>)),
+    BuildingId = binary_to_list(proplists:get_value(<<"buildingId">>, Qs, <<>>)),
+    case db_util:add_collector(DeviceId, DeviceName, DeviceType, BuildingId) of
+        ok ->
+            notify_update_eqpt_info(),
+            format_return("add collector success", ?SUCCESS_STATUS);
+        {error, Reason} ->
+            format_return(Reason, ?FAILURE_STATUS)
+    end.
+
+update_collector(Qs) ->
+    DeviceId = binary_to_list(proplists:get_value(<<"deviceId">>, Qs, <<>>)),
+    DeviceName = binary_to_list(proplists:get_value(<<"deviceName">>, Qs, <<>>)),
+    DeviceType = binary_to_list(proplists:get_value(<<"deviceType">>, Qs, <<>>)),
+    BuildingId = binary_to_list(proplists:get_value(<<"buildingId">>, Qs, <<>>)),
+    case db_util:update_collector(DeviceId, DeviceName, DeviceType, BuildingId) of
+        ok ->
+            notify_update_eqpt_info(),
+            format_return("update collector success", ?SUCCESS_STATUS);
+        {error, Reason} ->
+            format_return(Reason, ?FAILURE_STATUS)
+    end.
+
+delete_collector(Qs) ->
+    DeviceId = binary_to_list(proplists:get_value(<<"deviceId">>, Qs, <<>>)),
+    DeviceType = binary_to_list(proplists:get_value(<<"deviceType">>, Qs, <<>>)),
+    case db_util:delete_collector(DeviceId, DeviceType) of
+        ok ->
+            notify_update_eqpt_info(),
+            format_return("delete colletor success", ?SUCCESS_STATUS);
+        {error, Reason} ->
+            format_return(Reason, ?FAILURE_STATUS)
+    end.    
+
+download_archive(Qs) ->
+    MeterIds = binary_to_list(proplists:get_value(<<"meterIds">>, Qs, <<>>)),
+    Status = "1",
+    case db_util:update_eqpt_status(MeterIds, Status) of
+        ok ->
+            format_return("download archive success", ?SUCCESS_STATUS);
+        {error, Reason} ->
+            format_return(Reason, ?FAILURE_STATUS)
+    end.
+
+delete_archive(Qs) ->
+    MeterIds = binary_to_list(proplists:get_value(<<"meterIds">>, Qs, <<>>)),
+    Status = "0",
+    case db_util:update_eqpt_status(MeterIds, Status) of
+        ok ->
+            format_return("delete archive success", ?SUCCESS_STATUS);
+        {error, Reason} ->
+            format_return(Reason, ?FAILURE_STATUS)
+    end.
+
+init_archive(Qs) ->
+    DeviceId = binary_to_list(proplists:get_value(<<"deviceId">>, Qs, <<>>)),
+    DeviceType = binary_to_list(proplists:get_value(<<"deviceType">>, Qs, <<>>)),
+    case db_util:init_archive(DeviceId, DeviceType) of
+        ok ->
+            format_return("init archive success", ?SUCCESS_STATUS);
+        {error, Reason} ->
+            format_return(Reason, ?FAILURE_STATUS)
+    end.
+    
+update_short_number(Qs) ->
+    MeterId = binary_to_list(proplists:get_value(<<"meterId">>, Qs, <<>>)),
+    ShortNumber = binary_to_list(proplists:get_value(<<"shortNumber">>, Qs, <<>>)),
+    case db_util:update_short_number(MeterId, ShortNumber) of
+        ok ->
+            format_return("update short number success", ?SUCCESS_STATUS);
+        {error, Reason} ->
+            format_return(Reason, ?FAILURE_STATUS)
+    end.
+
+add_meter(Qs) ->
+    DeviceId = binary_to_list(proplists:get_value(<<"deviceId">>, Qs, <<>>)),
+    DeviceName = binary_to_list(proplists:get_value(<<"deviceName">>, Qs, <<>>)),
+    DeviceType = binary_to_list(proplists:get_value(<<"deviceType">>, Qs, <<>>)),
+    DeviceLabel = binary_to_list(proplists:get_value(<<"deviceLabel">>, Qs, <<"null">>)),
+    BuildingId = binary_to_list(proplists:get_value(<<"buildingId">>, Qs, <<>>)),
+    CollectorId = binary_to_list(proplists:get_value(<<"collectorId">>, Qs, <<>>)),
+    DeviceTab = binary_to_list(proplists:get_value(<<"deviceTab">>, Qs, <<>>)),
+    Baudrate = binary_to_list(proplists:get_value(<<"baudrate">>, Qs, <<"null">>)),
+    Commport = binary_to_list(proplists:get_value(<<"commport">>, Qs, <<>>)),
+    case db_util:add_meter(DeviceId, DeviceName, DeviceType, DeviceLabel, BuildingId, CollectorId, DeviceTab, 
+                           Baudrate, Commport) of
+        ok ->
+            notify_update_eqpt_info(),
+            format_return("add meter success", ?SUCCESS_STATUS);
+        {error, Reason} ->
+            format_return(Reason, ?FAILURE_STATUS)
+    end.
+
+update_meter(Qs) ->
+    DeviceId = binary_to_list(proplists:get_value(<<"deviceId">>, Qs, <<>>)),
+    DeviceName = binary_to_list(proplists:get_value(<<"deviceName">>, Qs, <<>>)),
+    DeviceLabel = binary_to_list(proplists:get_value(<<"deviceLabel">>, Qs, <<"null">>)),
+    BuildingId = binary_to_list(proplists:get_value(<<"buildingId">>, Qs, <<>>)),
+    DeviceTab = binary_to_list(proplists:get_value(<<"deviceTab">>, Qs, <<>>)),
+    Baudrate = binary_to_list(proplists:get_value(<<"baudrate">>, Qs, <<"null">>)),
+    Commport = binary_to_list(proplists:get_value(<<"commport">>, Qs, <<>>)),
+    case db_util:update_meter(DeviceId, DeviceName, BuildingId, DeviceTab, DeviceLabel,  
+                              Baudrate, Commport) of
+        ok ->
+            notify_update_eqpt_info(),
+            format_return("update meter success", ?SUCCESS_STATUS);
+        {error, Reason} ->
+            format_return(Reason, ?FAILURE_STATUS)
+    end.
+
+delete_meter(Qs) ->
+    DeviceId = binary_to_list(proplists:get_value(<<"deviceId">>, Qs, <<>>)),
+    DeviceType = binary_to_list(proplists:get_value(<<"deviceType">>, Qs, <<>>)),
+    case db_util:delete_meter(DeviceId, DeviceType) of
+        ok ->
+            notify_update_eqpt_info(),
+            format_return("delete meter success", ?SUCCESS_STATUS);
+        {error, Reason} ->
+            format_return(Reason, ?FAILURE_STATUS)
+    end.
+
+delete_meter_by_collector(Qs) ->
+    DeviceId = binary_to_list(proplists:get_value(<<"deviceId">>, Qs, <<>>)),
+    DeviceType = binary_to_list(proplists:get_value(<<"deviceType">>, Qs, <<>>)),
+    case db_util:delete_meter_by_collector(DeviceId, DeviceType) of
+        ok ->
+            notify_update_eqpt_info(),
+            format_return("delete meters of collector success", ?SUCCESS_STATUS);
+        {error, Reason} ->
+            format_return(Reason, ?FAILURE_STATUS)
+    end.
+
+add_building(Qs) ->
+    Pid = binary_to_list(proplists:get_value(<<"pid">>, Qs, <<>>)),
+    BuildingName = binary_to_list(proplists:get_value(<<"buildingName">>, Qs, <<>>)),
+    case db_util:add_building(Pid, BuildingName) of
+        ok ->
+            format_return("add building success", ?SUCCESS_STATUS);
+        {error, Reason} ->
+            format_return(Reason, ?FAILURE_STATUS)
+    end.
+
+update_building(Qs) ->
+    BuildingId = binary_to_list(proplists:get_value(<<"buildingId">>, Qs, <<>>)),
+    BuildingName = binary_to_list(proplists:get_value(<<"buildingName">>, Qs, <<>>)), 
+    case db_util:update_building(BuildingId, BuildingName) of
+        ok ->
+            format_return("update building success", ?SUCCESS_STATUS);
+        {error, Reason} ->
+            format_return(Reason, ?FAILURE_STATUS)
+    end.
+
+delete_building(Qs) ->
+    BuildingId = binary_to_list(proplists:get_value(<<"buildingId">>, Qs, <<>>)),
+    case db_util:delete_building(BuildingId) of
+        ok ->
+            format_return("delete building success", ?SUCCESS_STATUS);
+        {error, Reason} ->
+            format_return(Reason, ?FAILURE_STATUS)
+    end.
+
+%% 批量添加计量
+add_meters(Qs) ->
+    MeterInfoList = Qs,
+    case add_meters_(MeterInfoList) of
+        ok ->
+            notify_update_eqpt_info(),
+            format_return("add meters success", ?SUCCESS_STATUS);
+        {error, Reason} ->
+            format_return(Reason, ?FAILURE_STATUS)
+    end.
+            
+add_meters_(MeterInfoList) ->
+    add_meters_(MeterInfoList, []).
+
+add_meters_([MeterInfo | T], ErrorList) ->
+    DeviceId = binary_to_list(proplists:get_value(<<"deviceId">>, MeterInfo, <<>>)),
+    DeviceName = binary_to_list(proplists:get_value(<<"deviceName">>, MeterInfo, <<>>)),
+    DeviceType = binary_to_list(proplists:get_value(<<"deviceType">>, MeterInfo, <<>>)),
+    DeviceLabel = binary_to_list(proplists:get_value(<<"deviceLabel">>, MeterInfo, <<"null">>)),
+    BuildingId = binary_to_list(proplists:get_value(<<"buildingId">>, MeterInfo, <<>>)),
+    CollectorId = binary_to_list(proplists:get_value(<<"collectorId">>, MeterInfo, <<>>)),
+    DeviceTab = binary_to_list(proplists:get_value(<<"deviceTab">>, MeterInfo, <<>>)),
+    Baudrate = binary_to_list(proplists:get_value(<<"baudrate">>, MeterInfo, <<"null">>)),
+    Commport = binary_to_list(proplists:get_value(<<"commport">>, MeterInfo, <<>>)),
+    case db_util:add_meter(DeviceId, DeviceName, DeviceType, DeviceLabel, BuildingId, CollectorId, DeviceTab, 
+                           Baudrate, Commport) of
+        ok ->
+            add_meters_(T, ErrorList);            
+        {error, Reason} ->
+            add_meters_(T, [lists:flatten(io_lib:format("~s ~s", [DeviceId, Reason])) | ErrorList])
+    end;
+add_meters_(_, []) ->
+    ok;
+add_meters_(_, ErrorList) ->
+    Reason = string:join(ErrorList, ","),
+    {error, Reason}.
+
+add_collectors(Qs) ->
+    CollectorInfoList = Qs,
+    case add_collectors_(CollectorInfoList) of
+        ok ->
+            notify_update_eqpt_info(),
+            format_return("add collectors success", ?SUCCESS_STATUS);
+        {error, Reason} ->
+            format_return(Reason, ?FAILURE_STATUS)
+    end.
+
+add_collectors_(CollectorInfoList) ->
+    add_collectors_(CollectorInfoList, []).
+
+add_collectors_([CollectorInfo | T], ErrorList) ->
+    DeviceId = binary_to_list(proplists:get_value(<<"deviceId">>, CollectorInfo, <<>>)),
+    DeviceName = binary_to_list(proplists:get_value(<<"deviceName">>, CollectorInfo, <<>>)),
+    DeviceType = binary_to_list(proplists:get_value(<<"deviceType">>, CollectorInfo, <<>>)),
+    BuildingId = binary_to_list(proplists:get_value(<<"buildingId">>, CollectorInfo, <<>>)),
+    case db_util:add_collector(DeviceId, DeviceName, DeviceType, BuildingId) of
+        ok ->
+            add_collectors_(T, ErrorList);
+        {error, Reason} ->
+            add_collectors_(T, [lists:flatten(io_lib:format("~s ~s", [DeviceId, Reason])) | ErrorList])
+    end;
+add_collectors_(_, []) ->
+    ok;
+add_collectors_(_, ErrorList) ->
+    Reason = string:join(ErrorList, ","),
+    {error, Reason}.
+    
+field_format(Rows) ->
+    [field_format_(Row) || Row <- Rows].
+
+field_format_(Row) ->
+    Fun = 
+        fun(Item) ->
+                case Item of
+                    null -> <<"null">>;
+                    _ -> Item
+                end
+        end,
+    list_to_tuple(lists:map(Fun, tuple_to_list(Row))).
+
+format_return(Reason, ReturnCode) ->
+    ReturnMsgBin = ?HELPER:to_binary(io_lib:format("~s", [Reason])),
+    jsx:encode([{<<"returnCode">>, ReturnCode}, {<<"returnMsg">>, ReturnMsgBin}]).

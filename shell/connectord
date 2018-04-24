@@ -1,0 +1,73 @@
+#!/bin/bash
+#
+# connector     Startup script for connectord.
+#
+# chkconfig: 2345 90 10
+# description: connectord is connector server
+
+#source function library
+. /etc/rc.d/init.d/functions
+
+set -e
+
+export HOME=/root
+
+SERVER=connector
+
+SCRIPT=$(readlink -f $0 || true)
+if [ -z $SCRIPT ]; then
+   SCRIPT=$0
+fi;
+SCRIPT_DIR="$(cd `dirname "$SCRIPT"` && pwd -P)"
+RUNNER_ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+RUNNER_BASE_CMD=./bin/$SERVER
+
+#echo "script $SCRIPT"
+#echo "script dir $SCRIPT_DIR"
+#echo "runner root dir $RUNNER_ROOT_DIR"
+
+start() {
+    cd $RUNNER_ROOT_DIR && $RUNNER_BASE_CMD start
+    echo $RUNNER_ROOT_DIR
+    echo $?
+    if [ $? -eq 0 ]; then
+        echo "starting $SERVER ..."
+    fi    
+} 
+
+stop() {
+    cd $RUNNER_ROOT_DIR && $RUNNER_BASE_CMD stop
+    echo $RUNNER_ROOT_DIR
+    echo $?
+    if [ $? -eq 0 ]; then
+        echo "stopping $SERVER ..."
+    fi    
+}
+
+ping() {
+    echo "ping $SERVER ..."
+    cd $RUNNER_ROOT_DIR && $RUNNER_BASE_CMD ping
+}
+
+restart() {
+    stop
+    start
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart)
+        restart
+        ;;
+    ping)
+        ping
+        ;;
+    *)
+        echo $"Usage: $0 {start|stop|restart|ping}"               
+        RETVAL=2
+esac

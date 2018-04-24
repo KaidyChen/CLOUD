@@ -1,0 +1,25 @@
+{application, connector,
+ [{description, "Socket server connector"},
+  {vsn, "1.0.0"},
+  {registered, [connector_sup]},
+  {mod, { connector_app, []}},
+  {applications,
+   [kernel,
+    stdlib,
+    sqlite3,
+    jsx,
+    lager,
+    ssl,
+    inets,
+    cowboy
+   ]},
+  {env,[
+        {date, "2017-04-30"},
+        {version, "1.0.0"}
+       ]},
+  {modules, []},
+
+  {maintainers, []},
+  {licenses, []},
+  {links, []}
+ ]}.
